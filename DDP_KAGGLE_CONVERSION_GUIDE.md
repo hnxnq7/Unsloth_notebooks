@@ -22,21 +22,7 @@ This guide explains how to run ** Distributed Data Parallel (DDP)** training wit
 
 ## Step-by-Step Setup
 
-### Step 1: Convert Notebook to Python Script
-
-Since DDP requires multi-process execution, you need to convert your notebook to a `.py` script.
-
-**Option A: Manual Conversion**
-1. Download your notebook as `.ipynb`
-2. Use `jupyter nbconvert` or manually copy cells to a `.py` file
-3. Remove markdown cells, keep only code cells
-
-**Option B: Use Kaggle's Script Editor**
-1. In Kaggle, go to "Code" → "New Script"
-2. Copy code from notebook cells
-3. Save as `.py` file
-
-### Step 2: Add DDP Setup Code
+### Step 1: Add DDP Setup Code
 
 Add this at the beginning of your script (after imports):
 
@@ -79,7 +65,7 @@ rank, local_rank, world_size = setup_ddp()
 is_main_process = rank == 0 if rank is not None else True
 ```
 
-### Step 3: Modify Model Loading
+### Step 2: Modify Model Loading
 
 Update your model loading code:
 
@@ -110,7 +96,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 )
 ```
 
-### Step 4: Wrap Model with DDP
+### Step 3: Wrap Model with DDP
 
 After adding LoRA adapters, wrap the model:
 
@@ -129,7 +115,7 @@ if local_rank is not None:
     print(f"✅ Model wrapped with DDP on GPU {local_rank}")
 ```
 
-### Step 5: Update Trainer Configuration
+### Step 4: Update Trainer Configuration
 
 Modify your trainer args:
 
@@ -166,7 +152,7 @@ trainer = SFTTrainer(
 )
 ```
 
-### Step 6: Add Cleanup
+### Step 5: Add Cleanup
 
 At the end of your script:
 
@@ -232,7 +218,7 @@ Or run directly in a code cell:
 5. **Unwrap model** for trainer: `model.module`
 6. **Add cleanup** at the end
 
-### Compatibility Fixes (Always Include)
+### Compatibility Fixes
 
 Add this compatibility cell before model loading:
 
