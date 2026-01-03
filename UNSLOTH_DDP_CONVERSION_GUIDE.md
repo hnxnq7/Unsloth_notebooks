@@ -1,319 +1,505 @@
-# Unsloth Notebook to DDP Conversion Guide
+# DDP Training Guide for Unsloth on Kaggle 2x T4 GPUs
 
-This guide shows how to convert any Unsloth fine-tuning notebook to support **Distributed Data Parallel (DDP)** training on multiple GPUs (e.g., Kaggle 2x T4, Colab Pro, etc.).
+This guide explains how to run **true Distributed Data Parallel (DDP)** training with Unsloth notebooks on Kaggle's 2x T4 GPU setup.
 
-## Quick Summary
-
-**3 Simple Steps:**
-1. Add GPU detection and `device_map="balanced"` to model loading
-2. Update memory stats to be multi-GPU compatible
-3. Update inference code to use explicit device
+## Table of Contents
+1. [Overview](#overview)
+2. [Prerequisites](#prerequisites)
+3. [Step-by-Step Setup](#step-by-step-setup)
+4. [Code Modifications](#code-modifications)
+5. [Running with torchrun](#running-with-torchrun)
+6. [Troubleshooting](#troubleshooting)
+7. [Performance Tips](#performance-tips)
 
 ---
 
-## Step-by-Step Conversion
+## Overview
 
-### Step 1: Modify Model Loading Cell
+**DDP vs DataParallel:**
+- **DataParallel (DP)**: Single-process, splits batches across GPUs (slower, easier)
+- **DDP**: Multi-process, one process per GPU (faster, true parallelism)
 
-**Find this cell** (usually right after installation):
+**Why DDP on Kaggle?**
+- Better GPU utilization
+- Faster training (near-linear scaling)
+- More efficient memory usage
+- Industry-standard approach
+
+---
+
+## Prerequisites
+
+1. **Kaggle Notebook with 2x T4 GPUs enabled**
+2. **Unsloth notebook** (any model - Llama, Mistral, etc.)
+3. **Basic understanding** of command-line execution
+
+---
+
+## Step-by-Step Setup
+
+### Step 1: Convert Notebook to Python Script
+
+Since DDP requires multi-process execution, you need to convert your notebook to a `.py` script.
+
+**Option A: Manual Conversion**
+1. Download your notebook as `.ipynb`
+2. Use `jupyter nbconvert` or manually copy cells to a `.py` file
+3. Remove markdown cells, keep only code cells
+
+**Option B: Use Kaggle's Script Editor**
+1. In Kaggle, go to "Code" → "New Script"
+2. Copy code from notebook cells
+3. Save as `.py` file
+
+### Step 2: Add DDP Setup Code
+
+Add this at the beginning of your script (after imports):
+
 ```python
-from unsloth import FastLanguageModel
+import os
 import torch
-max_seq_length = 2048
-dtype = None
-load_in_4bit = True
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Meta-Llama-3.1-8B",
-    max_seq_length = max_seq_length,
-    dtype = dtype,
-    load_in_4bit = load_in_4bit,
-)
+# Initialize DDP
+def setup_ddp():
+    """Initialize distributed training"""
+    # Get environment variables set by torchrun
+    rank = int(os.environ.get("RANK", -1))
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", -1))
+    
+    if rank == -1:
+        # Not running with DDP
+        print("⚠️  Not running with DDP. Use: torchrun --nproc_per_node=2 script.py")
+        return None, None, None
+    
+    # Set device for this process
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    
+    # Initialize process group
+    dist.init_process_group(backend="nccl")
+    
+    # Set default device
+    torch.cuda.set_device(device)
+    
+    print(f"✅ DDP initialized: RANK={rank}, LOCAL_RANK={local_rank}, WORLD_SIZE={world_size}")
+    print(f"   Process using GPU {local_rank}: {torch.cuda.get_device_name(local_rank)}")
+    
+    return rank, local_rank, world_size
+
+# Call setup
+rank, local_rank, world_size = setup_ddp()
+is_main_process = rank == 0 if rank is not None else True
 ```
 
-**Replace with:**
+### Step 3: Modify Model Loading
+
+Update your model loading code:
+
 ```python
 from unsloth import FastLanguageModel
-import torch
 
-# ============================================================================
-# MULTI-GPU DDP SETUP (Fit-for-all modification for all Unsloth notebooks)
-# ============================================================================
-# This section automatically detects and sets up multi-GPU training.
-# Works on Kaggle 2x T4, Colab Pro, and any multi-GPU setup.
-#
-# Note: In notebooks, HuggingFace Trainer automatically uses DataParallel
-# (single-process multi-GPU) when multiple GPUs are detected. For true
-# multi-process DDP, use Unsloth CLI with torchrun (see Unsloth docs).
-
-# Detect number of GPUs
-num_gpus = torch.cuda.device_count()
-print(f"🦥 Detected {num_gpus} GPU(s)")
-
-# For multi-GPU setups, use device_map="balanced" to split model across GPUs
-# This helps with memory distribution and enables the trainer to use all GPUs
-if num_gpus > 1:
-    device_map = "balanced"
-    print(f"📊 Using device_map='balanced' to split model across {num_gpus} GPUs")
-    print(f"🚀 Trainer will automatically use all {num_gpus} GPUs for training")
-    print(f"   (Using DataParallel in notebook mode - for true DDP, use torchrun)")
+# DDP-aware device mapping
+if local_rank is not None:
+    # DDP mode: each process uses its own GPU
+    device_map = {"": local_rank}  # Put model on this process's GPU
+    print(f"📊 DDP mode: Loading model on GPU {local_rank}")
 else:
-    device_map = None
-    print("📊 Single GPU mode - no device_map needed")
-
-# ============================================================================
-# MODEL CONFIGURATION
-# ============================================================================
-max_seq_length = 2048 # Choose any! We auto support RoPE Scaling internally!
-dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
+    # Single GPU or DataParallel mode
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 1:
+        device_map = "auto"  # Split across GPUs
+        print(f"📊 Multi-GPU mode: Using device_map='auto'")
+    else:
+        device_map = None
+        print("📊 Single GPU mode")
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Meta-Llama-3.1-8B",
-    max_seq_length = max_seq_length,
-    dtype = dtype,
-    load_in_4bit = load_in_4bit,
-    device_map = device_map,  # Automatically splits model across GPUs if num_gpus > 1
-    # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+    model_name="unsloth/Meta-Llama-3.1-8B",  # Your model
+    max_seq_length=2048,
+    dtype=None,
+    load_in_4bit=True,
+    device_map=device_map,
 )
 ```
 
-**Key Changes:**
-- Added GPU detection: `num_gpus = torch.cuda.device_count()`
-- Added conditional `device_map = "balanced"` when `num_gpus > 1`
-- Pass `device_map` to `from_pretrained()`
+### Step 4: Wrap Model with DDP
 
----
+After adding LoRA adapters, wrap the model:
 
-### Step 2: Update Memory Stats Cells
-
-**Find the memory stats cell** (usually before training):
 ```python
-# @title Show current memory stats
-gpu_stats = torch.cuda.get_device_properties(0)
-start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
-max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
-print(f"GPU = {gpu_stats.name}. Max memory = {max_memory} GB.")
-print(f"{start_gpu_memory} GB of memory reserved.")
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    # ... other parameters
+)
+
+# Wrap with DDP if using distributed training
+if local_rank is not None:
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+    print(f"✅ Model wrapped with DDP on GPU {local_rank}")
 ```
 
-**Replace with:**
-```python
-# @title Show current memory stats (Multi-GPU compatible)
-num_gpus = torch.cuda.device_count()
-start_gpu_memory = []
-max_memory = []
+### Step 5: Update Trainer Configuration
 
-for i in range(num_gpus):
-    gpu_stats = torch.cuda.get_device_properties(i)
-    gpu_mem = round(torch.cuda.max_memory_reserved(i) / 1024 / 1024 / 1024, 3)
-    gpu_max = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
-    start_gpu_memory.append(gpu_mem)
-    max_memory.append(gpu_max)
-    print(f"GPU {i} = {gpu_stats.name}. Max memory = {gpu_max} GB. Reserved = {gpu_mem} GB.")
-
-if num_gpus > 1:
-    total_max = sum(max_memory)
-    total_reserved = sum(start_gpu_memory)
-    print(f"\n📊 Total across {num_gpus} GPUs: {total_max} GB max, {total_reserved} GB reserved")
-```
-
-**Find the final memory stats cell** (usually after training):
-```python
-# @title Show final memory and time stats
-used_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
-used_memory_for_lora = round(used_memory - start_gpu_memory, 3)
-used_percentage = round(used_memory / max_memory * 100, 3)
-lora_percentage = round(used_memory_for_lora / max_memory * 100, 3)
-print(f"{trainer_stats.metrics['train_runtime']} seconds used for training.")
-print(f"{round(trainer_stats.metrics['train_runtime']/60, 2)} minutes used for training.")
-print(f"Peak reserved memory = {used_memory} GB.")
-print(f"Peak reserved memory for training = {used_memory_for_lora} GB.")
-print(f"Peak reserved memory % of max memory = {used_percentage} %.")
-print(f"Peak reserved memory for training % of max memory = {lora_percentage} %.")
-```
-
-**Replace with:**
-```python
-# @title Show final memory and time stats (Multi-GPU compatible)
-num_gpus = torch.cuda.device_count()
-used_memory = []
-used_memory_for_lora = []
-
-for i in range(num_gpus):
-    gpu_used = round(torch.cuda.max_memory_reserved(i) / 1024 / 1024 / 1024, 3)
-    gpu_lora = round(gpu_used - start_gpu_memory[i], 3)
-    used_memory.append(gpu_used)
-    used_memory_for_lora.append(gpu_lora)
-    used_percentage = round(gpu_used / max_memory[i] * 100, 3)
-    lora_percentage = round(gpu_lora / max_memory[i] * 100, 3)
-    print(f"GPU {i}: Peak reserved = {gpu_used} GB ({used_percentage}%), Training = {gpu_lora} GB ({lora_percentage}%)")
-
-if num_gpus > 1:
-    total_used = sum(used_memory)
-    total_lora = sum(used_memory_for_lora)
-    total_max = sum(max_memory)
-    total_used_pct = round(total_used / total_max * 100, 3)
-    total_lora_pct = round(total_lora / total_max * 100, 3)
-    print(f"\n📊 Total across {num_gpus} GPUs: Peak = {total_used} GB ({total_used_pct}%), Training = {total_lora} GB ({total_lora_pct}%)")
-
-print(f"\n⏱️  {trainer_stats.metrics['train_runtime']} seconds ({round(trainer_stats.metrics['train_runtime']/60, 2)} minutes) used for training.")
-if num_gpus > 1:
-    print(f"🚀 DDP speedup: Training on {num_gpus} GPUs in parallel!")
-```
-
-**Key Changes:**
-- Loop through all GPUs instead of just GPU 0
-- Store stats in lists
-- Show per-GPU and total stats when multiple GPUs are present
-
----
-
-### Step 3: Update Inference Cells
-
-**Find inference cells** (usually after training):
-```python
-inputs = tokenizer([...], return_tensors = "pt").to("cuda")
-```
-
-**Replace with:**
-```python
-# For multi-GPU setups, inference uses the first GPU (or device_map handles it)
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-inputs = tokenizer([...], return_tensors = "pt").to(device)
-```
-
-**Key Changes:**
-- Use explicit `device = "cuda:0"` instead of `"cuda"`
-
----
-
-## Optional: Trainer Configuration
-
-The HuggingFace Trainer automatically detects and uses multiple GPUs when available. However, you can add a note:
+Modify your trainer args:
 
 ```python
 from trl import SFTConfig, SFTTrainer
 
-# ============================================================================
-# TRAINER CONFIGURATION WITH MULTI-GPU SUPPORT
-# ============================================================================
-# The trainer automatically uses multiple GPUs when available.
-# With device_map="balanced", the model is split across GPUs.
-# The trainer will distribute batches across GPUs for parallel training.
-
-num_gpus = torch.cuda.device_count()
-if num_gpus > 1:
-    print(f"🚀 Training with {num_gpus} GPUs")
-    print(f"   Model is split across GPUs using device_map='balanced'")
-    print(f"   Effective batch size: per_device_batch_size × {num_gpus} × gradient_accumulation_steps")
-    print(f"   = 2 × {num_gpus} × 4 = {2 * num_gpus * 4} samples per update")
-
 trainer = SFTTrainer(
-    model = model,
-    tokenizer = tokenizer,
-    train_dataset = dataset,
-    dataset_text_field = "text",
-    max_seq_length = max_seq_length,
-    packing = False,
-    args = SFTConfig(
-        per_device_train_batch_size = 2,
-        gradient_accumulation_steps = 4,
-        # ... rest of your config
+    model=model.module if hasattr(model, 'module') else model,  # Unwrap DDP for trainer
+    tokenizer=tokenizer,
+    train_dataset=dataset,
+    dataset_text_field="text",
+    max_seq_length=2048,
+    packing=False,
+    args=SFTConfig(
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
+        warmup_steps=5,
+        max_steps=60,
+        learning_rate=2e-4,
+        logging_steps=1,
+        optim="adamw_8bit",
+        weight_decay=0.001,
+        lr_scheduler_type="linear",
+        seed=3407,
+        output_dir="outputs",
+        report_to="none",
+        # DDP-specific settings
+        ddp_find_unused_parameters=False,
+        ddp_backend="nccl",
+        # Important: Only main process should save/log
+        save_strategy="steps" if is_main_process else "no",
+        logging_strategy="steps",
     ),
 )
 ```
 
----
+### Step 6: Add Cleanup
 
-## Checklist
-
-When converting a notebook, ensure:
-
-- [ ] Added GPU detection in model loading cell
-- [ ] Added `device_map="balanced"` when `num_gpus > 1`
-- [ ] Updated memory stats to loop through all GPUs
-- [ ] Updated inference to use explicit `device = "cuda:0"`
-- [ ] Tested on both single-GPU and multi-GPU setups
-
----
-
-## Important Notes
-
-1. **Notebook vs Script DDP:**
-   - In notebooks, the HuggingFace Trainer uses **DataParallel** (single-process multi-GPU)
-   - For true **multi-process DDP**, convert to a script and use `torchrun`:
-     ```bash
-     torchrun --nproc_per_node=2 train.py
-     ```
-   - See [Unsloth DDP documentation](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth/ddp) for script-based DDP
-
-2. **Backward Compatibility:**
-   - All changes are backward compatible
-   - Single-GPU notebooks will work exactly as before
-   - Multi-GPU notebooks automatically benefit from parallel training
-
-3. **Model Splitting:**
-   - `device_map="balanced"` splits the model across GPUs for memory efficiency
-   - Each GPU processes different batches in parallel
-   - Effective batch size = `per_device_batch_size × num_gpus × gradient_accumulation_steps`
-
----
-
-## Example: Complete Modified Cell
-
-Here's a complete example of the modified model loading cell:
+At the end of your script:
 
 ```python
-from unsloth import FastLanguageModel
-import torch
-
-# Multi-GPU DDP Setup
-num_gpus = torch.cuda.device_count()
-print(f"🦥 Detected {num_gpus} GPU(s)")
-
-if num_gpus > 1:
-    device_map = "balanced"
-    print(f"📊 Using device_map='balanced' to split model across {num_gpus} GPUs")
-else:
-    device_map = None
-    print("📊 Single GPU mode - no device_map needed")
-
-# Model Configuration
-max_seq_length = 2048
-dtype = None
-load_in_4bit = True
-
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Meta-Llama-3.1-8B",
-    max_seq_length = max_seq_length,
-    dtype = dtype,
-    load_in_4bit = load_in_4bit,
-    device_map = device_map,
-)
+# Cleanup DDP
+if rank is not None:
+    dist.destroy_process_group()
+    print("✅ DDP cleanup complete")
 ```
 
 ---
 
-## Testing
+## Running with torchrun
 
-After conversion, test on:
-1. **Single GPU:** Should work exactly as before
-2. **Multi-GPU (2x T4):** Should show:
-   - Model split across GPUs
-   - Training using both GPUs
-   - Faster training time
-   - Memory stats for both GPUs
+### In Kaggle Notebook
+
+Add a new code cell at the end:
+
+```python
+# Convert notebook to script and run with DDP
+import subprocess
+import sys
+
+# Save current notebook cells to script
+script_content = """
+# Paste your notebook code here, or use nbconvert
+"""
+
+# Write script
+with open("train_ddp.py", "w") as f:
+    f.write(script_content)
+
+# Run with torchrun
+!torchrun --nproc_per_node=2 --standalone train_ddp.py
+```
+
+### In Kaggle Script (Recommended)
+
+1. Create a new **Script** (not Notebook) in Kaggle
+2. Paste your converted code
+3. In the script settings, add this to "Script Settings" → "Command":
+
+```bash
+torchrun --nproc_per_node=2 --standalone train_ddp.py
+```
+
+Or run directly in a code cell:
+
+```python
+!torchrun --nproc_per_node=2 --standalone /kaggle/working/train_ddp.py
+```
 
 ---
 
-## References
+## Code Modifications Summary
 
-- [Unsloth Multi-GPU Training Docs](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth)
-- [Unsloth DDP Guide](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth/ddp)
-- [Unsloth GitHub](https://github.com/unslothai/unsloth)
+### Required Changes:
+
+1. **Add DDP initialization** (beginning of script)
+2. **Modify device_map** for DDP: `{"": local_rank}`
+3. **Wrap model with DDP** after LoRA setup
+4. **Update trainer args** with DDP settings
+5. **Unwrap model** for trainer: `model.module`
+6. **Add cleanup** at the end
+
+### Compatibility Fixes (Always Include)
+
+Add this compatibility cell before model loading:
+
+```python
+# ============================================================================
+# COMPATIBILITY FIXES FOR PEFT AND MULTI-GPU
+# ============================================================================
+from peft import LoraConfig
+import inspect
+
+# Fix 1: PEFT ensure_weight_tying compatibility
+sig = inspect.signature(LoraConfig.__init__)
+has_ensure_weight_tying = 'ensure_weight_tying' in sig.parameters
+
+if not has_ensure_weight_tying:
+    original_init = LoraConfig.__init__
+    def patched_init(self, *args, **kwargs):
+        kwargs.pop('ensure_weight_tying', None)
+        return original_init(self, *args, **kwargs)
+    LoraConfig.__init__ = patched_init
+    print("✓ Patched LoraConfig for ensure_weight_tying compatibility")
+
+# Fix 2: Multi-GPU attention device placement (if using device_map="auto")
+if torch.cuda.device_count() > 1:
+    try:
+        from xformers.ops.fmha.common import Inputs
+        from xformers.ops.fmha import _memory_efficient_attention_forward
+        
+        original_validate = Inputs.validate_inputs
+        def patched_validate_inputs(self):
+            if self.attn_bias is not None:
+                query_device = self.query.device
+                if hasattr(self.attn_bias, 'q_seqinfo'):
+                    if hasattr(self.attn_bias.q_seqinfo, 'seqstart'):
+                        if self.attn_bias.q_seqinfo.seqstart.device != query_device:
+                            self.attn_bias.q_seqinfo.seqstart = \
+                                self.attn_bias.q_seqinfo.seqstart.to(query_device)
+            return original_validate(self)
+        
+        Inputs.validate_inputs = patched_validate_inputs
+        
+        original_forward = _memory_efficient_attention_forward
+        def patched_forward(inp, op=None):
+            if inp.attn_bias is not None and inp.query is not None:
+                query_device = inp.query.device
+                if hasattr(inp.attn_bias, 'q_seqinfo'):
+                    if hasattr(inp.attn_bias.q_seqinfo, 'seqstart'):
+                        if inp.attn_bias.q_seqinfo.seqstart.device != query_device:
+                            inp.attn_bias.q_seqinfo.seqstart = \
+                                inp.attn_bias.q_seqinfo.seqstart.to(query_device)
+            return original_forward(inp, op)
+        
+        import xformers.ops.fmha
+        xformers.ops.fmha._memory_efficient_attention_forward = patched_forward
+        print("✓ Patched attention mechanism for multi-GPU compatibility")
+    except Exception as e:
+        print(f"⚠ Could not patch attention: {e}")
+```
 
 ---
 
-**That's it!** These 3 simple modifications will make any Unsloth notebook work with multiple GPUs. 🚀
+## Troubleshooting
 
+### Issue 1: "NCCL not found" or "backend not available"
+
+**Solution:**
+```python
+# Ensure NCCL is available (should be on Kaggle)
+print(f"NCCL available: {dist.is_nccl_available()}")
+# If False, you may need to use 'gloo' backend (slower)
+backend = "nccl" if dist.is_nccl_available() else "gloo"
+```
+
+### Issue 2: "Address already in use"
+
+**Solution:**
+```python
+# Add this before dist.init_process_group()
+os.environ['MASTER_ADDR'] = 'localhost'
+os.environ['MASTER_PORT'] = '12355'  # Change if port in use
+```
+
+### Issue 3: "CUDA out of memory"
+
+**Solutions:**
+- Reduce `per_device_train_batch_size`
+- Increase `gradient_accumulation_steps`
+- Use `load_in_4bit=True`
+- Reduce `max_seq_length`
+
+### Issue 4: Only one GPU being used
+
+**Check:**
+```python
+# Verify DDP is active
+print(f"RANK: {os.environ.get('RANK')}")
+print(f"LOCAL_RANK: {os.environ.get('LOCAL_RANK')}")
+print(f"WORLD_SIZE: {os.environ.get('WORLD_SIZE')}")
+
+# Check GPU usage
+for i in range(torch.cuda.device_count()):
+    print(f"GPU {i}: {torch.cuda.memory_allocated(i) / 1024**3:.2f} GB")
+```
+
+### Issue 5: Model not syncing across processes
+
+**Solution:**
+```python
+# Ensure model is wrapped correctly
+if local_rank is not None:
+    model = DDP(model, device_ids=[local_rank], 
+                find_unused_parameters=False,
+                broadcast_buffers=True)
+```
+
+---
+
+## Performance Tips
+
+1. **Batch Size**: With 2 GPUs, effective batch = `per_device_batch_size × 2 × gradient_accumulation_steps`
+   - Example: `per_device=2, grad_accum=4` → effective batch = 16
+
+2. **Gradient Accumulation**: Use to simulate larger batches without OOM
+   - DDP already multiplies by number of GPUs
+
+3. **Mixed Precision**: Unsloth handles this automatically, but you can verify:
+   ```python
+   print(f"Using dtype: {model.dtype}")
+   ```
+
+4. **Monitoring**: Only main process should log/save:
+   ```python
+   if is_main_process:
+       # Logging, saving, etc.
+   ```
+
+5. **Data Loading**: Ensure dataset is properly sharded:
+   ```python
+   # Trainer handles this automatically, but verify:
+   print(f"Dataset size: {len(dataset)}")
+   print(f"Expected per process: {len(dataset) // world_size}")
+   ```
+
+---
+
+## Complete Example Script Structure
+
+```python
+#!/usr/bin/env python3
+"""
+Unsloth DDP Training Script for Kaggle 2x T4
+Run with: torchrun --nproc_per_node=2 script.py
+"""
+
+# 1. Imports
+import os
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from unsloth import FastLanguageModel
+from trl import SFTConfig, SFTTrainer
+from datasets import load_dataset
+
+# 2. DDP Setup
+def setup_ddp():
+    rank = int(os.environ.get("RANK", -1))
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", -1))
+    
+    if rank == -1:
+        print("⚠️  Not running with DDP")
+        return None, None, None
+    
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    print(f"✅ DDP: RANK={rank}, LOCAL_RANK={local_rank}, WORLD_SIZE={world_size}")
+    return rank, local_rank, world_size
+
+rank, local_rank, world_size = setup_ddp()
+is_main_process = rank == 0 if rank is not None else True
+
+# 3. Compatibility Fixes
+# ... (paste compatibility code from above)
+
+# 4. Model Loading
+device_map = {"": local_rank} if local_rank is not None else "auto"
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/Meta-Llama-3.1-8B",
+    max_seq_length=2048,
+    dtype=None,
+    load_in_4bit=True,
+    device_map=device_map,
+)
+
+# 5. LoRA Setup
+model = FastLanguageModel.get_peft_model(model, r=16, ...)
+
+# 6. DDP Wrapping
+if local_rank is not None:
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+
+# 7. Data Preparation
+# ... (your data prep code)
+
+# 8. Trainer Setup
+trainer = SFTTrainer(
+    model=model.module if hasattr(model, 'module') else model,
+    # ... (your trainer config)
+)
+
+# 9. Training
+if is_main_process:
+    print("🚀 Starting training...")
+trainer_stats = trainer.train()
+
+# 10. Save (only main process)
+if is_main_process:
+    model.module.save_pretrained("lora_model") if hasattr(model, 'module') else model.save_pretrained("lora_model")
+    tokenizer.save_pretrained("lora_model")
+
+# 11. Cleanup
+if rank is not None:
+    dist.destroy_process_group()
+```
+
+---
+
+## Quick Reference
+
+### Command to Run:
+```bash
+torchrun --nproc_per_node=2 --standalone your_script.py
+```
+
+### Key Environment Variables:
+- `RANK`: Global process rank (0, 1, 2, ...)
+- `LOCAL_RANK`: Local GPU index (0, 1)
+- `WORLD_SIZE`: Total number of processes (2 for 2 GPUs)
+
+### Expected Speedup:
+- **2x T4 with DDP**: ~1.8-1.9x faster than single GPU
+- **2x T4 with DataParallel**: ~1.5-1.6x faster than single GPU
+
+---
+
+## Additional Resources
+
+- [Unsloth DDP Documentation](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth/ddp)
+- [PyTorch DDP Tutorial](https://pytorch.org/tutorials/intermediate/ddp_tutorial.html)
+- [Kaggle GPU Documentation](https://www.kaggle.com/docs/notebooks)
+
+---
+
+**Last Updated**: 2024
+**Compatible with**: Unsloth 2024.8+, PyTorch 2.0+, Kaggle 2x T4
