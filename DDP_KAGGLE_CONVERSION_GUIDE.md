@@ -180,9 +180,9 @@ with open("train_ddp.py", "w") as f:
 !torchrun --nproc_per_node=2 --standalone train_ddp.py
 ```
 
-### In Kaggle Script (Recommended)
+### In Kaggle Script
 
-1. Create a new **Script** (not Notebook) in Kaggle
+1. Create a new **Script** in Kaggle
 2. Paste your converted code
 3. In the script settings, add this to "Script Settings" → "Command":
 
@@ -209,9 +209,10 @@ Or run directly in a code cell:
 5. **Unwrap model** for trainer: `model.module`
 6. **Add cleanup** at the end
 
+
 ### Compatibility Fixes
 
-Add this compatibility cell before model loading:
+Add this compatibility cell before model loading if necessary:
 
 ```python
 # ============================================================================
@@ -268,90 +269,6 @@ if torch.cuda.device_count() > 1:
     except Exception as e:
         print(f"⚠ Could not patch attention: {e}")
 ```
-
----
-
-## Troubleshooting
-
-### Issue 1: "NCCL not found" or "backend not available"
-
-**Solution:**
-```python
-# Ensure NCCL is available (should be on Kaggle)
-print(f"NCCL available: {dist.is_nccl_available()}")
-# If False, you may need to use 'gloo' backend (slower)
-backend = "nccl" if dist.is_nccl_available() else "gloo"
-```
-
-### Issue 2: "Address already in use"
-
-**Solution:**
-```python
-# Add this before dist.init_process_group()
-os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '12355'  # Change if port in use
-```
-
-### Issue 3: "CUDA out of memory"
-
-**Solutions:**
-- Reduce `per_device_train_batch_size`
-- Increase `gradient_accumulation_steps`
-- Use `load_in_4bit=True`
-- Reduce `max_seq_length`
-
-### Issue 4: Only one GPU being used
-
-**Check:**
-```python
-# Verify DDP is active
-print(f"RANK: {os.environ.get('RANK')}")
-print(f"LOCAL_RANK: {os.environ.get('LOCAL_RANK')}")
-print(f"WORLD_SIZE: {os.environ.get('WORLD_SIZE')}")
-
-# Check GPU usage
-for i in range(torch.cuda.device_count()):
-    print(f"GPU {i}: {torch.cuda.memory_allocated(i) / 1024**3:.2f} GB")
-```
-
-### Issue 5: Model not syncing across processes
-
-**Solution:**
-```python
-# Ensure model is wrapped correctly
-if local_rank is not None:
-    model = DDP(model, device_ids=[local_rank], 
-                find_unused_parameters=False,
-                broadcast_buffers=True)
-```
-
----
-
-## Performance Tips
-
-1. **Batch Size**: With 2 GPUs, effective batch = `per_device_batch_size × 2 × gradient_accumulation_steps`
-   - Example: `per_device=2, grad_accum=4` → effective batch = 16
-
-2. **Gradient Accumulation**: Use to simulate larger batches without OOM
-   - DDP already multiplies by number of GPUs
-
-3. **Mixed Precision**: Unsloth handles this automatically, but you can verify:
-   ```python
-   print(f"Using dtype: {model.dtype}")
-   ```
-
-4. **Monitoring**: Only main process should log/save:
-   ```python
-   if is_main_process:
-       # Logging, saving, etc.
-   ```
-
-5. **Data Loading**: Ensure dataset is properly sharded:
-   ```python
-   # Trainer handles this automatically, but verify:
-   print(f"Dataset size: {len(dataset)}")
-   print(f"Expected per process: {len(dataset) // world_size}")
-   ```
 
 ---
 
