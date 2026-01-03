@@ -1,6 +1,7 @@
 # DDP Training Guide for Unsloth on Kaggle 2x T4 GPUs
 
 This guide explains how to run **Distributed Data Parallel (DDP)** training with Unsloth notebooks on Kaggle's 2x T4 GPU setup.
+- **2x T4 with DDP**: ~1.8-1.9x faster than single GPU
 
 ---
 
@@ -352,33 +353,3 @@ if rank is not None:
     dist.destroy_process_group()
 ```
 
----
-
-## Quick Reference
-
-### Command to Run:
-```bash
-torchrun --nproc_per_node=2 --standalone your_script.py
-```
-
-### Key Environment Variables:
-- `RANK`: Global process rank (0, 1, 2, ...)
-- `LOCAL_RANK`: Local GPU index (0, 1)
-- `WORLD_SIZE`: Total number of processes (2 for 2 GPUs)
-
-### Expected Speedup:
-- **2x T4 with DDP**: ~1.8-1.9x faster than single GPU
-- **2x T4 with DataParallel**: ~1.5-1.6x faster than single GPU
-
----
-
-## Additional Resources
-
-- [Unsloth DDP Documentation](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth/ddp)
-- [PyTorch DDP Tutorial](https://pytorch.org/tutorials/intermediate/ddp_tutorial.html)
-- [Kaggle GPU Documentation](https://www.kaggle.com/docs/notebooks)
-
----
-
-**Last Updated**: 2024
-**Compatible with**: Unsloth 2024.8+, PyTorch 2.0+, Kaggle 2x T4
