@@ -1,6 +1,6 @@
 # DDP Training Guide for Unsloth on Kaggle 2x T4 GPUs
 
-This guide explains how to run ** Distributed Data Parallel (DDP)** training with Unsloth notebooks on Kaggle's 2x T4 GPU setup.
+This guide explains how to run **Distributed Data Parallel (DDP)** training with Unsloth notebooks on Kaggle's 2x T4 GPU setup.
 
 ---
 
