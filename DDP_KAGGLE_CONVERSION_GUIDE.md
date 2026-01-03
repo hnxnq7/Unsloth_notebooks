@@ -2,21 +2,12 @@
 
 This guide explains how to run ** Distributed Data Parallel (DDP)** training with Unsloth notebooks on Kaggle's 2x T4 GPU setup.
 
-## Table of Contents
-1. [Prerequisites](#prerequisites)
-2. [Step-by-Step Setup](#step-by-step-setup)
-3. [Code Modifications](#code-modifications)
-4. [Running with torchrun](#running-with-torchrun)
-5. [Troubleshooting](#troubleshooting)
-6. [Performance Tips](#performance-tips)
-
 ---
 
 ## Prerequisites
 
 1. **Kaggle Notebook with 2x T4 GPUs enabled**
 2. **Unsloth notebook** (any model - Llama, Mistral, etc.)
-3. **Basic understanding** of command-line execution
 
 ---
 
