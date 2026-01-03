@@ -8,7 +8,7 @@ This guide explains how to run **Distributed Data Parallel (DDP)** training with
 ## Prerequisites
 
 1. **Kaggle Notebook with 2x T4 GPUs enabled**
-2. **Unsloth notebooks**: https://github.com/unslothai/notebooks/?tab=readme-ov-file#-kaggle-notebooks
+2. **[Unsloth notebooks](https://github.com/unslothai/notebooks/?tab=readme-ov-file#-fine-tuning-notebooks)**
 
 ---
 
